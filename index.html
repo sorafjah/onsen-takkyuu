@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>温泉卓球</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #14100b; overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    touch-action: none;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
+  }
+  #stage {
+    position: relative;
+    width: 100%; height: 100%;
+    max-width: 480px; margin: 0 auto;
+    overflow: hidden;
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+
+  .panel {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 16px;
+    background: rgba(18, 14, 8, 0.66);
+    color: #fdf8ec; text-align: center;
+    padding: 0 28px; box-sizing: border-box;
+    backdrop-filter: blur(2px);
+  }
+  .panel h1 {
+    margin: 0; font-size: 30px; letter-spacing: 0.35em; text-indent: 0.35em;
+    font-weight: 700;
+  }
+  .panel .sub {
+    font-size: 13px; line-height: 2; opacity: 0.92; margin: 0;
+  }
+  .panel .big {
+    font-size: 44px; margin: 0; letter-spacing: 0.2em; text-indent: 0.2em; font-weight: 800;
+  }
+  .panel button {
+    margin-top: 8px; padding: 13px 40px; font-size: 15px; font-weight: 700;
+    border-radius: 999px; border: none; letter-spacing: 0.15em; text-indent: 0.15em;
+    background: #57a05a; color: #fff;
+    box-shadow: 0 4px 0 #3c7440, 0 8px 18px rgba(0,0,0,0.35);
+  }
+  .panel button:active { transform: translateY(2px); box-shadow: 0 2px 0 #3c7440; }
+  #resultPanel { display: none; }
+  .record { font-size: 13px; opacity: 0.85; margin: 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game"></canvas>
+
+  <div class="panel" id="startPanel">
+    <h1>温泉卓球</h1>
+    <p class="sub">
+      左半分をドラッグ　→　左右にうごく<br>
+      ボールが手前にきたら右半分をタップ　→　返球<br>
+      6点先取。それより、ラリーを楽しんで。
+    </p>
+    <button id="startBtn">はじめる</button>
+  </div>
+
+  <div class="panel" id="resultPanel">
+    <p class="big" id="resultText">WIN</p>
+    <p class="record">さいこうラリー <span id="bestRally">0</span> 回</p>
+    <button id="retryBtn">もういっちょ</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+(() => {
+
+/* ============================================================
+   基本セットアップ
+============================================================ */
+const stage  = document.getElementById('stage');
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  const r = stage.getBoundingClientRect();
+  W = r.width; H = r.height;
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width  = Math.round(W * DPR);
+  canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp  = (a, b, t) => a + (b - a) * t;
+
+/* ============================================================
+   サウンド（Web Audio 合成）
+   ラリーが伸びるほど「下駄」「湯桶」が打球のリズムに重なる
+============================================================ */
+const AudioSys = (() => {
+  let ac = null, master = null;
+  function ensure() {
+    if (!ac) {
+      ac = new (window.AudioContext || window.webkitAudioContext)();
+      master = ac.createGain();
+      master.gain.value = 0.9;
+      master.connect(ac.destination);
+    }
+    if (ac.state === 'suspended') ac.resume();
+    return ac;
+  }
+  function env(t0, dur, peak) {
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(peak, t0 + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    g.connect(master);
+    return g;
+  }
+  function tone(freq, dur, type, peak, delay = 0, bend = 0) {
+    ensure();
+    const t0 = ac.currentTime + delay;
+    const o = ac.createOscillator();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, t0);
+    if (bend) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + bend), t0 + dur);
+    o.connect(env(t0, dur, peak));
+    o.start(t0); o.stop(t0 + dur + 0.03);
+  }
+  function knock(freq, dur, peak, delay = 0) {
+    // 木を叩いたような音（バンドパスを通したノイズ + 短いトーン）
+    ensure();
+    const t0 = ac.currentTime + delay;
+    const len = Math.max(1, Math.floor(ac.sampleRate * dur));
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.2);
+    const src = ac.createBufferSource();
+    src.buffer = buf;
+    const bp = ac.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = freq; bp.Q.value = 7;
+    src.connect(bp); bp.connect(env(t0, dur, peak));
+    src.start(t0);
+    tone(freq, dur * 0.7, 'triangle', peak * 0.5, delay);
+  }
+  return {
+    unlock: ensure,
+    ping()   { tone(760, 0.06, 'square', 0.13); knock(2400, 0.03, 0.10); },      // 打球
+    toc()    { knock(430, 0.05, 0.10); },                                        // 台バウンド
+    geta()   { knock(1500, 0.07, 0.16); knock(1050, 0.08, 0.13, 0.10); },        // カラン、コロン
+    yuoke(d = 0) { tone(330, 0.16, 'sine', 0.12, d, -60); tone(495, 0.10, 'sine', 0.05, d); }, // コポ
+    splash() {                                                                    // ポチャン
+      ensure();
+      tone(520, 0.05, 'sine', 0.12, 0, -300);
+      const t0 = ac.currentTime;
+      const len = Math.floor(ac.sampleRate * 0.28);
+      const buf = ac.createBuffer(1, len, ac.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 1.6);
+      const src = ac.createBufferSource(); src.buffer = buf;
+      const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900;
+      src.connect(lp); lp.connect(env(t0 + 0.05, 0.28, 0.12));
+      src.start(t0 + 0.05);
+    },
+    chime()  { tone(660, 0.12, 'sine', 0.14); tone(990, 0.18, 'sine', 0.12, 0.11); },
+    win()    { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.22, 'sine', 0.13, i * 0.13)); },
+    lose()   { tone(392, 0.3, 'sine', 0.12); tone(311, 0.45, 'sine', 0.12, 0.22); },
+  };
+})();
+
+/* 打球時：ラリー数に応じて音を重ねる。
+   halfDur = 飛行時間の半分（裏拍に湯桶を入れるとリズムになる） */
+function rallySound(rally, halfDur) {
+  AudioSys.ping();
+  if (rally >= 6)  AudioSys.geta();
+  if (rally >= 11) AudioSys.yuoke(halfDur);
+}
+
+/* ============================================================
+   コート座標系
+   nx: 0..1（台の左端→右端） / u: 0（奥=相手側）..1（手前=自分側）
+============================================================ */
+const COURT = {
+  topY: 0.385, botY: 0.665,   // 画面高さ比
+  topW: 0.66,  botW: 0.94,    // 画面幅比（台形）
+};
+function courtRow(u) {
+  const y = H * lerp(COURT.topY, COURT.botY, u);
+  const w = W * lerp(COURT.topW, COURT.botW, u);
+  return { y, w, x: (W - w) / 2 };
+}
+function courtPos(nx, u) {
+  const r = courtRow(u);
+  return { x: r.x + r.w * nx, y: r.y, scale: lerp(0.86, 1.0, u) };
+}
+
+/* ============================================================
+   ゲーム状態
+============================================================ */
+const G = {
+  running: false,
+  scoreP: 0, scoreC: 0,
+  rally: 0, bestRally: 0,
+  pX: 0.5, cX: 0.5,          // パドル位置（nx）
+  pXPrev: 0.5, pVel: 0,      // 自分の左右移動の勢い（打ち分けに使う）
+  swingP: 0, swingC: 0,      // スリッパ振りアニメ 0..1
+  serveNext: 'player',
+  msg: null, msgT: 0,        // フロートメッセージ
+  shake: 0,
+  steamBoost: 0,             // ミス時など湯気が濃くなる
+  time: 0,
+};
+
+/* ボール飛行：t 0→1、from 側から反対側へ */
+let flight = null;
+function newFlight(from, x0, x1, rally) {
+  const dur = clamp(1.15 - rally * 0.028, 0.62, 1.15);  // ラリーが続くほど速く
+  return {
+    from, x0, x1, t: 0, dur,
+    bounceT: 0.58,           // 相手コートで1バウンド
+    bounced: false,
+    peak1: 1.0, peak2: 0.45, // 山の高さ（相対）
+  };
+}
+function flightU(f) {
+  return f.from === 'player' ? 1 - f.t : f.t;   // u: 1=手前, 0=奥
+}
+function flightHeight(f) {
+  // ネット越えの大きな山 → バウンド後の小さな山
+  if (f.t < f.bounceT) {
+    return f.peak1 * Math.sin(Math.PI * f.t / f.bounceT);
+  }
+  const s = (f.t - f.bounceT) / (1 - f.bounceT);
+  return f.peak2 * Math.sin(Math.PI * clamp(s, 0, 1.15));
+}
+function flightX(f) { return lerp(f.x0, f.x1, f.t); }
+
+/* 難易度カーブ：ラリーが伸びると「息切れ」で双方ややミスしやすくなる */
+function cpuErrorChance(rally) {
+  if (rally < 5)  return 0.05;
+  if (rally < 10) return 0.11;
+  if (rally < 16) return 0.17;
+  return 0.24;
+}
+function playerSweetSpot(rally) {
+  // 位置の許容ズレ。基本かなり甘め、長ラリーでじわっと狭く
+  return clamp(0.30 - rally * 0.004, 0.20, 0.30);
+}
+const TAP_EARLY = 0.70;      // タップ受付開始（t）
+const TAP_GRACE = 0.14;      // 着弾後の猶予（t換算）
+const CPU_RACKET_OFFSET = 0.16; // スリッパは体の中心からこのぶんズレた位置にある（相手は鏡像なので中心より外側）
+
+/* ============================================================
+   進行
+============================================================ */
+const HIT_WAIT = 'wait';     // 得点間のインターバル
+let phase = 'idle';          // idle / play / wait / over
+let waitTimer = 0;
+
+function startGame() {
+  G.scoreP = 0; G.scoreC = 0; G.bestRally = 0;
+  G.pX = 0.5; G.cX = 0.5;
+  G.serveNext = Math.random() < 0.5 ? 'player' : 'cpu';
+  document.getElementById('resultPanel').style.display = 'none';
+  G.running = true;
+  startPoint();
+}
+
+function startPoint() {
+  G.rally = 0;
+  const from = G.serveNext;
+  const x0 = from === 'player' ? G.pX : G.cX;
+  const x1 = clamp(x0 + (Math.random() - 0.5) * 0.5, 0.15, 0.85);
+  flight = newFlight(from, x0, x1, 0);
+  phase = 'play';
+  AudioSys.ping();
+}
+
+function pointWon(winner, reason) {
+  flight = null;
+  phase = HIT_WAIT;
+  waitTimer = 1.15;
+  G.steamBoost = 1;
+  if (winner === 'player') { G.scoreP++; G.serveNext = 'cpu'; }
+  else                     { G.scoreC++; G.serveNext = 'player'; }
+  AudioSys.splash();
+  setTimeout(() => AudioSys.chime(), 350);
+  showMsg(reason);
+  G.shake = 1;
+  if (G.scoreP >= 6 || G.scoreC >= 6) {
+    phase = 'over';
+    G.running = false;
+    const winP = G.scoreP > G.scoreC;
+    setTimeout(() => {
+      document.getElementById('resultText').textContent = winP ? 'WIN' : 'LOSE';
+      document.getElementById('bestRally').textContent = G.bestRally;
+      document.getElementById('resultPanel').style.display = 'flex';
+      winP ? AudioSys.win() : AudioSys.lose();
+    }, 900);
+  }
+}
+
+function showMsg(text) {
+  G.msg = text; G.msgT = 0;
+}
+
+/* 打球成立の共通処理 */
+function returnBall(from, hitX) {
+  G.rally++;
+  G.bestRally = Math.max(G.bestRally, G.rally);
+  let aim;
+  if (from === 'player') {
+    // 動きながら打つと、その勢いの方向にコースが飛ぶ（右へ走りながら打てば右へ、など）
+    const velAim = clamp(G.pVel * 0.32, -0.26, 0.26);
+    aim = clamp(hitX + velAim, 0.12, 0.88);
+    if (Math.random() < 0.3) {
+      // たまに軽いノイズ（狙いが少し逸れる）
+      aim = clamp(aim + (Math.random() - 0.5) * 0.20, 0.12, 0.88);
+    }
+  } else {
+    aim = clamp(0.5 + (hitX - 0.5) * -0.3 + (Math.random() - 0.5) * 0.72, 0.12, 0.88);
+  }
+  flight = newFlight(from, hitX, aim, G.rally);
+  rallySound(G.rally, flight.dur * 0.5);
+  if (from === 'player') G.swingP = 1; else G.swingC = 1;
+  if (G.rally === 6)  showMsg('いい音してきた');
+  if (G.rally === 11) showMsg('ととのってきた…！');
+  if (G.rally === 20) showMsg('名勝負');
+}
+
+/* プレイヤーのタップ */
+function tryPlayerHit() {
+  if (phase !== 'play' || !flight || flight.from !== 'cpu') return;
+  const f = flight;
+  if (f.t < TAP_EARLY) { // 早すぎ：空振りモーションだけ（ペナルティなし）
+    G.swingP = 1;
+    return;
+  }
+  const dist = Math.abs(flightX(f) - G.pX);
+  if (dist <= playerSweetSpot(G.rally)) {
+    returnBall('player', clamp(flightX(f), 0.1, 0.9));
+  } else {
+    G.swingP = 1;   // 届かず空振り → ボールはそのまま流れてミスになる
+  }
+}
+
+/* ============================================================
+   更新
+============================================================ */
+function update(dt) {
+  G.time += dt;
+  if (dt > 0) {
+    const rawVel = (G.pX - G.pXPrev) / dt;
+    G.pVel = lerp(G.pVel, rawVel, 0.5);
+  }
+  G.pXPrev = G.pX;
+  G.swingP = Math.max(0, G.swingP - dt * 4);
+  G.swingC = Math.max(0, G.swingC - dt * 4);
+  G.shake  = Math.max(0, G.shake - dt * 3);
+  G.steamBoost = Math.max(0, G.steamBoost - dt * 0.5);
+  if (G.msg) { G.msgT += dt; if (G.msgT > 1.6) G.msg = null; }
+
+  if (phase === HIT_WAIT) {
+    waitTimer -= dt;
+    if (waitTimer <= 0 && G.running) startPoint();
+    return;
+  }
+  if (phase !== 'play' || !flight) return;
+
+  const f = flight;
+  f.t += dt / f.dur;
+
+  if (!f.bounced && f.t >= f.bounceT) {
+    f.bounced = true;
+    AudioSys.toc();
+  }
+
+  // CPU：ボールを少し遅れて追う
+  if (f.from === 'player') {
+    const rawTarget = lerp(f.x1, flightX(f), 0.3);
+    const ballTargetX = clamp(0.5 + (rawTarget - 0.5) * 1.35, 0.04, 0.96);
+    // 体の中心をボールよりオフセット分ずらして、スリッパ側でボールを迎えにいく
+    const target = clamp(ballTargetX + CPU_RACKET_OFFSET, 0.04, 0.96);
+    G.cX += (target - G.cX) * clamp(dt * 3.4, 0, 1);
+    G.cX = clamp(G.cX, 0.04, 0.96);
+    if (f.t >= 1) {
+      // CPUの返球判定：スリッパの実際の位置とボールの距離で見る
+      const racketX = G.cX - CPU_RACKET_OFFSET;
+      const diff = G.scoreP - G.scoreC;
+      const focus = diff >= 3 ? 0.4 : 1;   // 3点差以上つけられると気合いが入ってミスが減る
+      const whiff = Math.random() < cpuErrorChance(G.rally) * focus || Math.abs(f.x1 - racketX) > 0.24;
+      if (whiff) {
+        G.swingC = 1;
+        pointWon('player', 'あいて、湯あたり');
+      } else {
+        returnBall('cpu', f.x1);
+      }
+    }
+  } else {
+    // プレイヤー側へ飛行中。着弾+猶予を過ぎたらミス
+    if (f.t >= 1 + TAP_GRACE) {
+      pointWon('cpu', 'ポチャン…');
+    }
+  }
+}
+
+/* ============================================================
+   描画
+============================================================ */
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  if (G.shake > 0) {
+    ctx.translate((Math.random() - 0.5) * G.shake * 6, (Math.random() - 0.5) * G.shake * 4);
+  }
+  drawRoom();
+  drawTable();
+  drawFigure(G.cX, 0, 'cpu', G.swingC);
+  if (flight) drawBall(flight);
+  drawFigure(G.pX, 1, 'player', G.swingP);
+  drawSteam();
+  drawHud();
+  ctx.restore();
+}
+
+/* ---------- 広間 ---------- */
+function drawRoom() {
+  const wallH = H * 0.42;
+
+  // 壁（砂壁っぽい生成テクスチャは重いので2トーン + 巾木で表現）
+  ctx.fillStyle = '#e7dfc9';
+  ctx.fillRect(0, 0, W, wallH);
+  // 天井まわり（蛍光灯の帯）
+  ctx.fillStyle = '#d9cfae';
+  ctx.fillRect(0, 0, W, H * 0.075);
+  ctx.fillStyle = '#f5efdb';
+  ctx.fillRect(W * 0.3, H * 0.028, W * 0.4, H * 0.02);
+  ctx.fillStyle = 'rgba(255,252,230,0.5)';
+  ctx.fillRect(W * 0.28, H * 0.048, W * 0.44, H * 0.012);
+  // 長押（なげし）
+  ctx.fillStyle = '#8a6f4d';
+  ctx.fillRect(0, H * 0.075, W, H * 0.012);
+
+  // 木床（板の目地）
+  ctx.fillStyle = '#c49a62';
+  ctx.fillRect(0, wallH, W, H - wallH);
+  ctx.strokeStyle = 'rgba(90, 60, 25, 0.25)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 7; i++) {
+    const t = i / 6;
+    const y = wallH + (H - wallH) * (t * t * 0.9 + t * 0.1);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  // 床のツヤ（蛍光灯の反射）
+  ctx.fillStyle = 'rgba(255, 250, 225, 0.10)';
+  ctx.beginPath();
+  ctx.ellipse(W * 0.5, wallH + (H - wallH) * 0.25, W * 0.3, H * 0.05, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // 巾木
+  ctx.fillStyle = '#7a5f3e';
+  ctx.fillRect(0, wallH - H * 0.008, W, H * 0.008);
+
+  drawDoor();
+  drawVending();
+  drawNoren();
+}
+
+/* 開いた引き戸（左） */
+function drawDoor() {
+  const x = W * 0.015, y = H * 0.115, w = W * 0.24, h = H * 0.295;
+  // 枠
+  ctx.fillStyle = '#6d5638';
+  ctx.fillRect(x - 4, y - 4, w + 8, h + 8);
+  // 開いた奥（暗い廊下、奥にほんのり照明）
+  ctx.fillStyle = '#3a3128';
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = 'rgba(255, 230, 170, 0.16)';
+  ctx.fillRect(x + w * 0.1, y + h * 0.15, w * 0.35, h * 0.5);
+  ctx.fillStyle = 'rgba(255, 230, 170, 0.10)';
+  ctx.fillRect(x + w * 0.12, y + h * 0.65, w * 0.7, h * 0.3);
+  // 引き残した障子戸（右に寄せてある）
+  const dw = w * 0.46;
+  ctx.fillStyle = '#f3ecd8';
+  ctx.fillRect(x + w - dw, y, dw, h);
+  ctx.strokeStyle = '#b3a67f';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i++) {
+    const gy = y + h * i / 4;
+    ctx.beginPath(); ctx.moveTo(x + w - dw, gy); ctx.lineTo(x + w, gy); ctx.stroke();
+  }
+  for (let i = 1; i < 3; i++) {
+    const gx = x + w - dw + dw * i / 3;
+    ctx.beginPath(); ctx.moveTo(gx, y); ctx.lineTo(gx, y + h); ctx.stroke();
+  }
+  ctx.strokeStyle = '#6d5638';
+  ctx.lineWidth = 2.5;
+  ctx.strokeRect(x + w - dw, y, dw, h);
+}
+
+/* 自動販売機（右） */
+function drawVending() {
+  const w = W * 0.185, h = H * 0.30;
+  const x = W * 0.79, y = H * 0.115;
+  // 本体
+  ctx.fillStyle = '#c8402f';
+  rr(x, y, w, h, 5); ctx.fill();
+  ctx.fillStyle = '#a53020';
+  ctx.fillRect(x, y + h * 0.92, w, h * 0.08);
+  // 商品窓（光る）
+  const gx = x + w * 0.1, gy = y + h * 0.10, gw = w * 0.8, gh = h * 0.42;
+  ctx.fillStyle = '#fff7dd';
+  ctx.fillRect(gx, gy, gw, gh);
+  ctx.fillStyle = 'rgba(255, 244, 200, 0.35)';
+  ctx.fillRect(gx - 5, gy - 5, gw + 10, gh + 10);
+  ctx.fillStyle = '#fff7dd';
+  ctx.fillRect(gx, gy, gw, gh);
+  // 瓶（ラムネ・コーヒー牛乳・緑茶・いちご牛乳）を2段に並べる
+  const drinks = [
+    { c: '#79b6e8', cap: '#4a7fb0' },   // ラムネ
+    { c: '#e9c47a', cap: '#a97c2e' },   // コーヒー牛乳
+    { c: '#8fbf72', cap: '#5e8a45' },   // 緑茶
+    { c: '#eda3b4', cap: '#c06a80' },   // いちご牛乳
+  ];
+  const bw = gw * 0.30, bh = gh * 0.36;
+  drinks.forEach((d, i) => {
+    const col = i % 2, row = Math.floor(i / 2);
+    const bx = gx + gw * (0.12 + col * 0.44);
+    const by = gy + gh * (0.10 + row * 0.46);
+    ctx.fillStyle = d.c;
+    rr(bx, by, bw, bh, bw * 0.22); ctx.fill();
+    ctx.fillStyle = d.cap;
+    ctx.fillRect(bx + bw * 0.28, by - bh * 0.16, bw * 0.44, bh * 0.18);
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.fillRect(bx + bw * 0.16, by + bh * 0.18, bw * 0.16, bh * 0.55);
+  });
+  // 押しボタンの列・取り出し口
+  ctx.fillStyle = '#f2e6cf';
+  for (let i = 0; i < 4; i++) {
+    ctx.fillRect(x + w * (0.14 + i * 0.20), y + h * 0.58, w * 0.12, h * 0.035);
+  }
+  ctx.fillStyle = '#701f13';
+  rr(x + w * 0.15, y + h * 0.70, w * 0.7, h * 0.14, 4); ctx.fill();
+  // つめたい表示
+  ctx.fillStyle = '#2f6db3';
+  ctx.fillRect(x + w * 0.1, y + h * 0.645, w * 0.34, h * 0.038);
+}
+
+/* のれん（奥の壁・雰囲気） */
+function drawNoren() {
+  const w = W * 0.34, h = H * 0.115, x = W * 0.5 - w / 2, y = H * 0.058;
+  // 掛け竿
+  ctx.fillStyle = '#5a4530';
+  ctx.fillRect(x - 6, y - 5, w + 12, 4);
+  ctx.fillStyle = '#274a80';
+  for (let i = 0; i < 3; i++) {
+    const px = x + (w / 3) * i;
+    ctx.fillRect(px + 2, y, w / 3 - 4, h + Math.sin(G.time * 1.4 + i) * 3);
+  }
+  ctx.fillStyle = '#f3ecd8';
+  ctx.font = `700 ${Math.round(H * 0.040)}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.fillText('ゆ', x + w / 2, y + h * 0.62);
+}
+
+/* ---------- 卓球台 ---------- */
+function drawTable() {
+  const top = courtRow(0), bot = courtRow(1);
+  // 台の脚
+  ctx.fillStyle = '#3a4d42';
+  const legW = W * 0.02;
+  ctx.fillRect(bot.x + bot.w * 0.12, bot.y, legW, H * 0.10);
+  ctx.fillRect(bot.x + bot.w * 0.86, bot.y, legW, H * 0.10);
+  // 台の側面（厚み）
+  ctx.fillStyle = '#174f36';
+  ctx.beginPath();
+  ctx.moveTo(bot.x, bot.y); ctx.lineTo(bot.x + bot.w, bot.y);
+  ctx.lineTo(bot.x + bot.w, bot.y + H * 0.018); ctx.lineTo(bot.x, bot.y + H * 0.018);
+  ctx.closePath(); ctx.fill();
+  // 天板
+  const grad = ctx.createLinearGradient(0, top.y, 0, bot.y);
+  grad.addColorStop(0, '#1e6a47');
+  grad.addColorStop(1, '#27835a');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(top.x, top.y); ctx.lineTo(top.x + top.w, top.y);
+  ctx.lineTo(bot.x + bot.w, bot.y); ctx.lineTo(bot.x, bot.y);
+  ctx.closePath(); ctx.fill();
+  // 白線（外周・センター）
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(top.x, top.y); ctx.lineTo(top.x + top.w, top.y);
+  ctx.lineTo(bot.x + bot.w, bot.y); ctx.lineTo(bot.x, bot.y);
+  ctx.closePath(); ctx.stroke();
+  ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(W / 2, top.y); ctx.lineTo(W / 2, bot.y); ctx.stroke();
+  // ネット
+  const mid = courtRow(0.5);
+  const netH = H * 0.030;
+  ctx.fillStyle = 'rgba(240, 236, 220, 0.9)';
+  ctx.fillRect(mid.x - 4, mid.y - netH, mid.w + 8, 2.5);
+  ctx.strokeStyle = 'rgba(120, 120, 110, 0.55)';
+  ctx.lineWidth = 0.7;
+  for (let gx = mid.x; gx <= mid.x + mid.w; gx += 7) {
+    ctx.beginPath(); ctx.moveTo(gx, mid.y - netH); ctx.lineTo(gx, mid.y); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.moveTo(mid.x - 4, mid.y); ctx.lineTo(mid.x + mid.w + 4, mid.y); ctx.stroke();
+  // ネット支柱
+  ctx.fillStyle = '#555';
+  ctx.fillRect(mid.x - 6, mid.y - netH, 3, netH);
+  ctx.fillRect(mid.x + mid.w + 3, mid.y - netH, 3, netH);
+}
+
+/* ---------- 人物（浴衣 + 緑スリッパ） ---------- */
+function drawFigure(nx, u, side, swing) {
+  const p = courtPos(nx, clamp(u, 0, 1));
+  const near = side === 'player';
+  const s = p.scale * (near ? 1.15 : 1.08) * Math.min(W / 400, 1.25);
+  const baseY = p.y + (near ? H * 0.085 : H * 0.010);
+
+  ctx.save();
+  ctx.translate(p.x, baseY);
+  ctx.scale(s, s);
+  if (!near) ctx.scale(-1, 1);   // 相手は鏡像にして向かい合わせ感
+
+  const bob = Math.sin(G.time * 3 + (near ? 0 : 1.7)) * 1.5;
+  ctx.translate(0, bob);
+
+  // --- 浴衣の身体（台形） ---
+  const bw = 46, bh = 62;
+  ctx.beginPath();
+  ctx.moveTo(-bw * 0.42, 0);
+  ctx.quadraticCurveTo(-bw * 0.55, -bh * 0.55, -bw * 0.32, -bh);
+  ctx.lineTo(bw * 0.32, -bh);
+  ctx.quadraticCurveTo(bw * 0.55, -bh * 0.55, bw * 0.42, 0);
+  ctx.closePath();
+  ctx.fillStyle = '#fbfaf4';
+  ctx.fill();
+  ctx.strokeStyle = '#c9c2ae';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // --- 青海波柄（身体でクリップ） ---
+  ctx.save();
+  ctx.clip();
+  ctx.strokeStyle = '#3a6cb0';
+  ctx.lineWidth = 1.1;
+  for (let row = 0; row < 5; row++) {
+    const y = -bh + 10 + row * 13;
+    const off = (row % 2) * 9;
+    for (let cx = -bw * 0.6 + off; cx < bw * 0.6; cx += 18) {
+      for (let rad = 8; rad > 2; rad -= 2.6) {
+        ctx.beginPath();
+        ctx.arc(cx, y, rad, Math.PI, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+  }
+  ctx.restore();
+
+  // --- 衿（V字の白） ---
+  ctx.fillStyle = '#fbfaf4';
+  ctx.beginPath();
+  ctx.moveTo(-10, -bh); ctx.lineTo(0, -bh + 20); ctx.lineTo(10, -bh);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#8fa8c8';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-10, -bh); ctx.lineTo(0, -bh + 20); ctx.lineTo(10, -bh);
+  ctx.stroke();
+
+  // --- 帯 ---
+  ctx.fillStyle = near ? '#2c3e66' : '#96413a';
+  ctx.fillRect(-bw * 0.48, -bh * 0.42, bw * 0.96, 11);
+  ctx.fillStyle = 'rgba(255,255,255,0.14)';
+  ctx.fillRect(-bw * 0.48, -bh * 0.42 + 8, bw * 0.96, 2);
+
+  // --- 頭 ---
+  ctx.fillStyle = '#f0c398';
+  ctx.beginPath(); ctx.arc(0, -bh - 15, 14, 0, Math.PI * 2); ctx.fill();
+
+  if (near) {
+    // 自分（手前）は台に背を向けている＝後ろ姿。後頭部の髪で頭を覆い、顔は描かない
+    ctx.fillStyle = '#3b3028';
+    ctx.beginPath(); ctx.arc(0, -bh - 15, 14, 0, Math.PI * 2); ctx.fill();
+    // 襟足
+    ctx.beginPath();
+    ctx.moveTo(-11, -bh - 5); ctx.quadraticCurveTo(0, -bh + 2, 11, -bh - 5);
+    ctx.lineTo(9, -bh - 12); ctx.quadraticCurveTo(0, -bh - 6, -9, -bh - 12);
+    ctx.closePath(); ctx.fill();
+  } else {
+    // 相手（奥）はこちらを向いている＝正面
+    ctx.fillStyle = '#3b3028';
+    ctx.beginPath();
+    ctx.arc(0, -bh - 18, 14, Math.PI * 1.05, Math.PI * 1.95);
+    ctx.quadraticCurveTo(12, -bh - 26, 0, -bh - 30);
+    ctx.closePath(); ctx.fill();
+  }
+  // タオル鉢巻（温泉感）
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(-14, -bh - 26, 28, 5);
+  ctx.strokeStyle = '#9fc0dd';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(-14, -bh - 23.5); ctx.lineTo(14, -bh - 23.5); ctx.stroke();
+  if (!near) {
+    // 顔（点目 + 頬）※正面を向く相手のみ
+    ctx.fillStyle = '#3b3028';
+    ctx.beginPath(); ctx.arc(-5, -bh - 15, 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(5, -bh - 15, 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(235, 130, 110, 0.5)';
+    ctx.beginPath(); ctx.arc(-8, -bh - 10, 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(8, -bh - 10, 2.5, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // --- 腕 + 緑スリッパ ---
+  const swingAng = -swing * 1.15;   // ラジアン
+  ctx.save();
+  ctx.translate(bw * 0.36, -bh * 0.62);
+  ctx.rotate(swingAng);
+  // 袖（浴衣のたもと）
+  ctx.fillStyle = '#fbfaf4';
+  ctx.strokeStyle = '#c9c2ae';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(22, 6);
+  ctx.lineTo(20, 18);
+  ctx.lineTo(2, 12);
+  ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  // 手
+  ctx.fillStyle = '#f0c398';
+  ctx.beginPath(); ctx.arc(26, 8, 5, 0, Math.PI * 2); ctx.fill();
+  // スリッパ（大きめ・緑）
+  ctx.translate(34, 4);
+  ctx.rotate(-0.5);
+  ctx.fillStyle = '#4d9e55';
+  ctx.strokeStyle = '#2f6b38';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 20, 11, 0, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
+  // 甲ベルト
+  ctx.fillStyle = '#3c7f44';
+  ctx.beginPath();
+  ctx.ellipse(-4, 0, 9, 10, 0, -Math.PI * 0.5, Math.PI * 0.5);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.beginPath();
+  ctx.ellipse(6, -3, 7, 3, -0.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // --- 足（自分のみ表示。台の奥に立つ相手の足は台に隠れるため省略） ---
+  if (near) {
+    // 素足（すね）
+    ctx.fillStyle = '#f0c398';
+    ctx.fillRect(-13, -8, 7, 12);
+    ctx.fillRect(6, -8, 7, 12);
+    // 足もと（緑スリッパとおそろいの色でまとめる）
+    ctx.fillStyle = '#3f7a45';
+    ctx.beginPath(); ctx.ellipse(-9, 6, 10, 5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(10, 6, 10, 5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#265030';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.ellipse(-9, 6, 10, 5, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(10, 6, 10, 5, 0, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+/* ---------- ボール ---------- */
+function drawBall(f) {
+  const u = flightU(f);
+  const p = courtPos(flightX(f), clamp(u, -0.05, 1.05));
+  const hRel = flightHeight(f);
+  const hPix = hRel * H * 0.10 * lerp(0.7, 1.1, u);
+  const r = lerp(4, 8, clamp(u, 0, 1));
+
+  // 影
+  ctx.fillStyle = `rgba(0, 40, 20, ${0.28 - hRel * 0.15})`;
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y - 2, r * (1 + hRel * 0.4), r * 0.4, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 玉
+  const by = p.y - hPix - r - 3;
+  ctx.fillStyle = '#f7f5ee';
+  ctx.beginPath(); ctx.arc(p.x, by, r, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(140,140,120,0.5)';
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.beginPath(); ctx.arc(p.x - r * 0.3, by - r * 0.35, r * 0.3, 0, Math.PI * 2); ctx.fill();
+
+  // タップ受付中はプレイヤー側にガイドリング
+  if (f.from === 'cpu' && f.t >= TAP_EARLY && f.t <= 1 + TAP_GRACE) {
+    const gp = courtPos(f.x1, 1);
+    const pulse = 1 + Math.sin(G.time * 12) * 0.08;
+    ctx.strokeStyle = 'rgba(255, 240, 160, 0.85)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.ellipse(gp.x, gp.y, 24 * pulse, 10 * pulse, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+/* ---------- 湯気 ---------- */
+const steamParticles = [];
+for (let i = 0; i < 14; i++) {
+  steamParticles.push({
+    x: Math.random(), y: Math.random(),
+    r: 20 + Math.random() * 42,
+    sp: 0.014 + Math.random() * 0.02,
+    ph: Math.random() * Math.PI * 2,
+  });
+}
+function drawSteam() {
+  const boost = G.steamBoost;
+  for (const s of steamParticles) {
+    s.y -= s.sp * (1 / 60);
+    if (s.y < -0.12) { s.y = 1.1; s.x = Math.random(); }
+    const wob = Math.sin(G.time * 0.7 + s.ph) * 0.02;
+    const alpha = (0.045 + boost * 0.06) * (0.6 + 0.4 * Math.sin(G.time + s.ph));
+    ctx.fillStyle = `rgba(250, 250, 245, ${clamp(alpha, 0.02, 0.14)})`;
+    ctx.beginPath();
+    ctx.arc((s.x + wob) * W, s.y * H, s.r * (W / 400), 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+/* ---------- HUD（スコア等はcanvas描画で世界観に馴染ませる） ---------- */
+function drawHud() {
+  const y = H * 0.045;
+  // スコア板（木札風）
+  hudPlate(W * 0.09, y, 'あなた', G.scoreP, '#2c3e66');
+  hudPlate(W * 0.91, y, 'あいて', G.scoreC, '#96413a');
+
+  // フロートメッセージ
+  if (G.msg) {
+    const t = G.msgT;
+    const alpha = t < 0.2 ? t / 0.2 : t > 1.2 ? clamp(1 - (t - 1.2) / 0.4, 0, 1) : 1;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = `rgba(50, 38, 22, ${alpha * 0.9})`;
+    ctx.font = `700 ${Math.round(H * 0.026)}px sans-serif`;
+    ctx.fillText(G.msg, W / 2, H * 0.30 - t * 12);
+  }
+
+  // 操作ガイド（開始直後だけ薄く）
+  if (G.running && G.time < 6) {
+    const a = clamp(6 - G.time, 0, 1) * 0.5;
+    ctx.font = `${Math.round(H * 0.015)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = `rgba(50, 38, 22, ${a})`;
+    ctx.fillText('← ドラッグでうごく', W * 0.27, H * 0.90);
+    ctx.fillText('タップで打つ →', W * 0.73, H * 0.90);
+  }
+}
+function hudPlate(cx, cy, label, score, color) {
+  const w = W * 0.155, h = H * 0.062;
+  ctx.fillStyle = '#f3ecd8';
+  ctx.strokeStyle = '#8a6f4d';
+  ctx.lineWidth = 2;
+  rr(cx - w / 2, cy - h * 0.35, w, h, 6);
+  ctx.fill(); ctx.stroke();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = color;
+  ctx.font = `700 ${Math.round(H * 0.013)}px sans-serif`;
+  ctx.fillText(label, cx, cy - h * 0.06);
+  ctx.fillStyle = '#3a2e1c';
+  ctx.font = `800 ${Math.round(H * 0.030)}px sans-serif`;
+  ctx.fillText(score, cx, cy + h * 0.46);
+}
+
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+/* ============================================================
+   入力（マルチタッチ：左指=移動、右指=タップ を同時に成立させる）
+============================================================ */
+let movePointerId = null;
+let moveOffsetX = 0;   // 指位置とパドルのズレを保持（吸い付き防止）
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (!G.running) return;
+  canvas.setPointerCapture(e.pointerId);
+  const rect = canvas.getBoundingClientRect();
+  const nx = (e.clientX - rect.left) / rect.width;
+  if (nx < 0.55 && movePointerId === null) {
+    movePointerId = e.pointerId;
+    moveOffsetX = G.pX - nx;
+  } else {
+    tryPlayerHit();
+  }
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (e.pointerId !== movePointerId || !G.running) return;
+  const rect = canvas.getBoundingClientRect();
+  const nx = (e.clientX - rect.left) / rect.width;
+  G.pX = clamp(nx + moveOffsetX, 0.08, 0.92);
+});
+function releasePointer(e) {
+  if (e.pointerId === movePointerId) movePointerId = null;
+}
+canvas.addEventListener('pointerup', releasePointer);
+canvas.addEventListener('pointercancel', releasePointer);
+
+/* キーボードでも一応遊べるように（PC確認用） */
+const keys = {};
+window.addEventListener('keydown', (e) => {
+  keys[e.key] = true;
+  if (e.key === ' ' && G.running) { e.preventDefault(); tryPlayerHit(); }
+});
+window.addEventListener('keyup', (e) => { keys[e.key] = false; });
+function keyMove(dt) {
+  if (!G.running) return;
+  const v = 0.9 * dt;
+  if (keys['ArrowLeft'])  G.pX = clamp(G.pX - v, 0.08, 0.92);
+  if (keys['ArrowRight']) G.pX = clamp(G.pX + v, 0.08, 0.92);
+}
+
+/* ============================================================
+   ループ
+============================================================ */
+let lastT = performance.now();
+function loop(now) {
+  const dt = Math.min(0.034, (now - lastT) / 1000);
+  lastT = now;
+  keyMove(dt);
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+/* ============================================================
+   開始・リトライ
+============================================================ */
+document.getElementById('startBtn').addEventListener('click', () => {
+  AudioSys.unlock();
+  document.getElementById('startPanel').style.display = 'none';
+  G.time = 0;
+  startGame();
+});
+document.getElementById('retryBtn').addEventListener('click', () => {
+  AudioSys.unlock();
+  startGame();
+});
+
+})();
+</script>
+</body>
+</html>
