@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>温泉卓球</title>
 <style>
   html, body {
@@ -13,10 +16,16 @@
     touch-action: none;
     font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
   }
+  body {
+    display: flex; align-items: center; justify-content: center;
+  }
+  @supports (height: 100dvh) {
+    html, body { height: 100dvh; }
+  }
   #stage {
     position: relative;
     width: 100%; height: 100%;
-    max-width: 480px; margin: 0 auto;
+    margin: auto;
     overflow: hidden;
   }
   canvas { display: block; width: 100%; height: 100%; }
@@ -52,6 +61,7 @@
 </style>
 </head>
 <body>
+<!-- build: 2026-07-23-3 -->
 <div id="stage">
   <canvas id="game"></canvas>
 
@@ -84,9 +94,16 @@ const canvas = document.getElementById('game');
 const ctx    = canvas.getContext('2d');
 
 let W = 0, H = 0, DPR = 1;
+/* PW: プレイ領域（卓球台まわり）の幅、PX: その左端。
+   画面が横に広いときは、プレイ領域は中央に据え置いたまま、
+   その外側（ガター）に部屋の続きを描き足す */
+let PW = 0, PX = 0, GUT = 0;
 function resize() {
   const r = stage.getBoundingClientRect();
   W = r.width; H = r.height;
+  PW = Math.min(W, H * 0.62);
+  PX = (W - PW) / 2;
+  GUT = PX;                       // 片側のガター幅
   DPR = Math.min(window.devicePixelRatio || 1, 2);
   canvas.width  = Math.round(W * DPR);
   canvas.height = Math.round(H * DPR);
@@ -94,6 +111,9 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 resize();
+
+/* プレイ領域内の正規化X(0..1) → 画面X */
+const px = (nx) => PX + nx * PW;
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const lerp  = (a, b, t) => a + (b - a) * t;
@@ -186,13 +206,13 @@ function rallySound(rally, halfDur) {
    nx: 0..1（台の左端→右端） / u: 0（奥=相手側）..1（手前=自分側）
 ============================================================ */
 const COURT = {
-  topY: 0.385, botY: 0.665,   // 画面高さ比
+  topY: 0.385, botY: 0.80,    // 画面高さ比
   topW: 0.66,  botW: 0.94,    // 画面幅比（台形）
 };
 function courtRow(u) {
   const y = H * lerp(COURT.topY, COURT.botY, u);
-  const w = W * lerp(COURT.topW, COURT.botW, u);
-  return { y, w, x: (W - w) / 2 };
+  const w = PW * lerp(COURT.topW, COURT.botW, u);
+  return { y, w, x: PX + (PW - w) / 2 };
 }
 function courtPos(nx, u) {
   const r = courtRow(u);
@@ -274,10 +294,25 @@ function startGame() {
 function startPoint() {
   G.rally = 0;
   const from = G.serveNext;
-  const x0 = from === 'player' ? G.pX : G.cX;
+  if (from === 'player') {
+    // 自分のサーブ：タップされるまでボールは飛ばさない
+    phase = 'serveWait';
+    flight = null;
+    return;
+  }
+  const x0 = G.cX;
   const x1 = clamp(x0 + (Math.random() - 0.5) * 0.5, 0.15, 0.85);
-  flight = newFlight(from, x0, x1, 0);
+  flight = newFlight('cpu', x0, x1, 0);
   phase = 'play';
+  AudioSys.ping();
+}
+
+function doPlayerServe() {
+  const x0 = G.pX;
+  const x1 = clamp(x0 + (Math.random() - 0.5) * 0.5, 0.15, 0.85);
+  flight = newFlight('player', x0, x1, 0);
+  phase = 'play';
+  G.swingP = 1;
   AudioSys.ping();
 }
 
@@ -335,6 +370,7 @@ function returnBall(from, hitX) {
 
 /* プレイヤーのタップ */
 function tryPlayerHit() {
+  if (phase === 'serveWait') { doPlayerServe(); return; }
   if (phase !== 'play' || !flight || flight.from !== 'cpu') return;
   const f = flight;
   if (f.t < TAP_EARLY) { // 早すぎ：空振りモーションだけ（ペナルティなし）
@@ -422,6 +458,7 @@ function draw() {
   drawTable();
   drawFigure(G.cX, 0, 'cpu', G.swingC);
   if (flight) drawBall(flight);
+  else if (phase === 'serveWait') drawServeBall();
   drawFigure(G.pX, 1, 'player', G.swingP);
   drawSteam();
   drawHud();
@@ -468,11 +505,12 @@ function drawRoom() {
   drawDoor();
   drawVending();
   drawNoren();
+  drawExtraScenery();
 }
 
 /* 開いた引き戸（左） */
 function drawDoor() {
-  const x = W * 0.015, y = H * 0.115, w = W * 0.24, h = H * 0.295;
+  const w = PW * 0.24, x = px(0.015), y = H * 0.115, h = H * 0.295;
   // 枠
   ctx.fillStyle = '#6d5638';
   ctx.fillRect(x - 4, y - 4, w + 8, h + 8);
@@ -504,8 +542,8 @@ function drawDoor() {
 
 /* 自動販売機（右） */
 function drawVending() {
-  const w = W * 0.185, h = H * 0.30;
-  const x = W * 0.79, y = H * 0.115;
+  const w = PW * 0.185, h = H * 0.30;
+  const x = px(0.79), y = H * 0.115;
   // 本体
   ctx.fillStyle = '#c8402f';
   rr(x, y, w, h, 5); ctx.fill();
@@ -552,7 +590,7 @@ function drawVending() {
 
 /* のれん（奥の壁・雰囲気） */
 function drawNoren() {
-  const w = W * 0.34, h = H * 0.115, x = W * 0.5 - w / 2, y = H * 0.058;
+  const w = PW * 0.34, h = H * 0.115, x = px(0.5) - w / 2, y = H * 0.058;
   // 掛け竿
   ctx.fillStyle = '#5a4530';
   ctx.fillRect(x - 6, y - 5, w + 12, 4);
@@ -567,14 +605,365 @@ function drawNoren() {
   ctx.fillText('ゆ', x + w / 2, y + h * 0.62);
 }
 
+/* ---------- 空いた壁面を埋める追加シーン ---------- */
+function drawExtraScenery() {
+  // --- プレイ領域の中（卓球台まわりの壁）---
+  // 自販機の前で一仕事終えた顔で牛乳を飲んでいる人（もう少し手前・大きめに）
+  drawGuest(px(0.905), H * 0.52, 0.95, {
+    pose: 'milk', robe: '#e2ecdf', sash: '#4f7a5c',
+  });
+
+  // --- 左右のガター（画面が横に広いときだけ、部屋の続きを描き足す）---
+  if (GUT > 20) drawGutter('left');
+  if (GUT > 20) drawGutter('right');
+}
+
+/* ガター＝プレイ領域の外側。壁と床は drawRoom が画面全体に描いてあるので、
+   ここには「その場所にあるはずのモノ」を足していく */
+function drawGutter(side) {
+  const isLeft = side === 'left';
+  const x0 = isLeft ? 0 : PX + PW;          // ガターの左端
+  const gw = GUT;
+  const cx = (t) => x0 + gw * t;            // ガター内の相対位置 → 画面X
+  const wallH = H * 0.42;
+  const s = Math.min(PW / 400, 1.25);
+
+  // 壁と床のつなぎ目に柱を立てて、部屋が続いている感じを出す
+  ctx.fillStyle = '#8a6f4d';
+  const pillarW = Math.max(6, PW * 0.018);
+  ctx.fillRect(isLeft ? x0 + gw - pillarW / 2 : x0 - pillarW / 2, H * 0.087, pillarW, wallH - H * 0.087);
+
+  if (isLeft) {
+    // 【上段】壁の飾り：貼り紙とポスターは離して置く
+    drawNotice(cx(0.16), H * 0.10, Math.min(gw * 0.30, PW * 0.09), H * 0.10);
+    drawPoster(cx(0.60), H * 0.11, Math.min(gw * 0.36, PW * 0.115), H * 0.125, '湯めぐり');
+    // 【前段】手前に長椅子と、そこに腰かけて休んでいる人
+    drawBench(cx(0.42), H * 0.685, Math.min(gw * 0.62, PW * 0.30));
+    drawSittingGuest(cx(0.30), H * 0.685, 0.82, '#e6e2d2', '#5a6a86');
+    drawFan(cx(0.86), H * 0.65, s * 1.1);
+    drawBucket(cx(0.10), H * 0.72, s * 1.1);
+  } else {
+    // 【上段】壁の飾り：時計と貼り紙を離して置く
+    drawClock(cx(0.52), H * 0.10, Math.min(gw * 0.15, PW * 0.042));
+    drawNotice(cx(0.82), H * 0.105, Math.min(gw * 0.26, PW * 0.075), H * 0.09);
+    // 【中段】下駄箱
+    drawShoeRack(cx(0.30), H * 0.47, Math.min(gw * 0.48, PW * 0.16), H * 0.21);
+    // 【前段】手前で立ち話している二人と観葉植物
+    drawGuest(cx(0.56), H * 0.665, 0.85, { pose: 'wait', robe: '#e9e0ec', sash: '#6b5580' });
+    drawGuest(cx(0.80), H * 0.70, 0.88, { pose: 'milk', robe: '#efe6d8', sash: '#8a6a3a' });
+    drawPlant(cx(0.12), H * 0.70, s * 1.1);
+  }
+}
+
+/* 貼り紙 */
+function drawNotice(cx, topY, w, h) {
+  ctx.save();
+  ctx.translate(cx, topY);
+  ctx.rotate(-0.02);
+  ctx.fillStyle = '#fbf6e6';
+  ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+  ctx.lineWidth = 1;
+  ctx.fillRect(-w / 2, 0, w, h);
+  ctx.strokeRect(-w / 2, 0, w, h);
+  // 文字に見立てた線
+  ctx.strokeStyle = '#6d5a3c';
+  ctx.lineWidth = Math.max(1, h * 0.035);
+  for (let i = 0; i < 4; i++) {
+    const y = h * (0.28 + i * 0.17);
+    const lw = w * (i === 3 ? 0.42 : 0.66);
+    ctx.beginPath(); ctx.moveTo(-lw / 2, y); ctx.lineTo(lw / 2, y); ctx.stroke();
+  }
+  ctx.fillStyle = '#b1442f';
+  ctx.fillRect(-w * 0.3, h * 0.10, w * 0.6, h * 0.055);
+  ctx.restore();
+}
+
+/* 下駄箱まわりの見た目だけの乱数（毎フレーム同じ結果になるよう決定的にする） */
+function slipperHash(n) {
+  const x = Math.sin(n * 12.9898 + 78.233) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+/* 下駄箱：スリッパは横長に寝かせて、枠内にランダムに置く */
+function drawShoeRack(cx, footY, w, h) {
+  ctx.fillStyle = '#8a6a44';
+  ctx.fillRect(cx - w / 2, footY - h, w, h);
+  ctx.strokeStyle = 'rgba(60,40,20,0.45)';
+  ctx.lineWidth = 1;
+  const cols = 3, rows = 3;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const idx = r * cols + c;
+      const bx = cx - w / 2 + (w / cols) * c + 2;
+      const by = footY - h + (h / rows) * r + 2;
+      const bw = w / cols - 4, bh = h / rows - 4;
+      ctx.fillStyle = '#6d5233';
+      ctx.fillRect(bx, by, bw, bh);
+      ctx.strokeRect(bx, by, bw, bh);
+      // 6割くらいの枠にスリッパが横向きで入っている（配置は枠ごとに固定のランダム）
+      if (slipperHash(idx * 7.1 + 1) < 0.62) {
+        const jx = (slipperHash(idx * 7.1 + 2) - 0.5) * bw * 0.20;
+        const jy = (slipperHash(idx * 7.1 + 3) - 0.5) * bh * 0.20;
+        const ang = (slipperHash(idx * 7.1 + 4) - 0.5) * 0.4;
+        const shade = 0.82 + slipperHash(idx * 7.1 + 5) * 0.32;
+        ctx.save();
+        ctx.translate(bx + bw * 0.5 + jx, by + bh * 0.58 + jy);
+        ctx.rotate(ang);
+        ctx.fillStyle = `rgb(${Math.round(77 * shade)}, ${Math.round(158 * shade)}, ${Math.round(85 * shade)})`;
+        ctx.strokeStyle = 'rgba(40,90,45,0.6)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        // 横長（幅方向に長い）スリッパ
+        ctx.ellipse(0, 0, bw * 0.44, bh * 0.20, 0, 0, Math.PI * 2);
+        ctx.fill(); ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+  ctx.fillStyle = '#6b5030';
+  ctx.fillRect(cx - w / 2 - 3, footY - h - 5, w + 6, 5);
+}
+
+/* 壁掛け時計 */
+function drawClock(cx, cy, r) {
+  ctx.fillStyle = '#f3ecd8';
+  ctx.strokeStyle = '#5a4530';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = '#3b3028';
+  ctx.lineWidth = Math.max(1.2, r * 0.10);
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, cy - r * 0.55); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + r * 0.42, cy + r * 0.22); ctx.stroke();
+}
+
+/* 扇風機（首振り） */
+function drawFan(cx, footY, s) {
+  const headR = 13 * s, poleH = 40 * s;
+  ctx.strokeStyle = '#8d8d88';
+  ctx.lineWidth = 3 * s;
+  ctx.beginPath(); ctx.moveTo(cx, footY); ctx.lineTo(cx, footY - poleH); ctx.stroke();
+  ctx.fillStyle = '#9a9a94';
+  ctx.beginPath(); ctx.ellipse(cx, footY, 12 * s, 4 * s, 0, 0, Math.PI * 2); ctx.fill();
+  // 首振り
+  const sway = Math.sin(G.time * 0.8) * 0.35;
+  ctx.save();
+  ctx.translate(cx, footY - poleH - headR * 0.6);
+  ctx.scale(Math.cos(sway), 1);
+  ctx.fillStyle = '#cfcfc7';
+  ctx.beginPath(); ctx.arc(0, 0, headR, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#8d8d88';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 4; i++) {
+    ctx.beginPath(); ctx.arc(0, 0, headR * (0.28 + i * 0.22), 0, Math.PI * 2); ctx.stroke();
+  }
+  // 羽根
+  ctx.fillStyle = 'rgba(120,120,115,0.55)';
+  const spin = G.time * 6;
+  for (let i = 0; i < 3; i++) {
+    ctx.save();
+    ctx.rotate(spin + i * Math.PI * 2 / 3);
+    ctx.beginPath();
+    ctx.ellipse(headR * 0.42, 0, headR * 0.42, headR * 0.20, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+/* 湯桶 */
+function drawBucket(cx, footY, s) {
+  const w = 22 * s, h = 14 * s;
+  ctx.fillStyle = '#d9b57e';
+  ctx.beginPath();
+  ctx.moveTo(cx - w / 2, footY - h);
+  ctx.lineTo(cx + w / 2, footY - h);
+  ctx.lineTo(cx + w * 0.38, footY);
+  ctx.lineTo(cx - w * 0.38, footY);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#c49a62';
+  ctx.beginPath(); ctx.ellipse(cx, footY - h, w / 2, h * 0.22, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#a5804d';
+  ctx.lineWidth = 1.5 * s;
+  ctx.beginPath(); ctx.moveTo(cx - w * 0.46, footY - h * 0.5); ctx.lineTo(cx + w * 0.46, footY - h * 0.5); ctx.stroke();
+}
+
+/* 観葉植物 */
+function drawPlant(cx, footY, s) {
+  const potW = 20 * s, potH = 16 * s;
+  ctx.fillStyle = '#a9613f';
+  ctx.beginPath();
+  ctx.moveTo(cx - potW / 2, footY - potH);
+  ctx.lineTo(cx + potW / 2, footY - potH);
+  ctx.lineTo(cx + potW * 0.36, footY);
+  ctx.lineTo(cx - potW * 0.36, footY);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#3f7a45';
+  for (let i = 0; i < 5; i++) {
+    const a = -Math.PI / 2 + (i - 2) * 0.42 + Math.sin(G.time * 0.9 + i) * 0.04;
+    ctx.save();
+    ctx.translate(cx, footY - potH);
+    ctx.rotate(a);
+    ctx.beginPath();
+    ctx.ellipse(0, -18 * s, 5 * s, 20 * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+/* 長椅子に腰かけている人 */
+function drawSittingGuest(cx, footY, scaleBase, robe, sash) {
+  const s = scaleBase * Math.min(PW / 400, 1.25);
+  ctx.save();
+  ctx.translate(cx, footY);
+  ctx.scale(s, s);
+  const seatY = -22;
+  // 太もも（前に出す）
+  ctx.fillStyle = robe;
+  ctx.fillRect(-4, seatY, 26, 11);
+  // 胴
+  ctx.beginPath();
+  ctx.moveTo(-16, seatY);
+  ctx.quadraticCurveTo(-19, seatY - 26, -11, seatY - 42);
+  ctx.lineTo(11, seatY - 42);
+  ctx.quadraticCurveTo(19, seatY - 26, 16, seatY);
+  ctx.closePath();
+  ctx.fillStyle = robe; ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = 1; ctx.stroke();
+  // 帯
+  ctx.fillStyle = sash;
+  ctx.fillRect(-17, seatY - 20, 34, 7);
+  // すね
+  ctx.fillStyle = '#f0c398';
+  ctx.fillRect(17, seatY + 8, 6, 16);
+  ctx.fillStyle = '#4d9e55';
+  ctx.beginPath(); ctx.ellipse(21, seatY + 25, 9, 4, 0, 0, Math.PI * 2); ctx.fill();
+  // 頭
+  ctx.fillStyle = '#f0c398';
+  ctx.beginPath(); ctx.arc(0, seatY - 53, 11, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#3b3028';
+  ctx.beginPath();
+  ctx.arc(0, seatY - 56, 11, Math.PI * 1.08, Math.PI * 1.92);
+  ctx.quadraticCurveTo(9, seatY - 62, 0, seatY - 64);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#3b3028'; ctx.lineWidth = 1.3;
+  ctx.beginPath(); ctx.moveTo(-5, seatY - 53); ctx.lineTo(-1, seatY - 53); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(2, seatY - 53); ctx.lineTo(6, seatY - 53); ctx.stroke();
+  ctx.restore();
+}
+
+function drawBench(cx, footY, w) {
+  const s = Math.min(PW / 400, 1.25);
+  const h = 10 * s, legH = 16 * s;
+  ctx.fillStyle = '#7a5b3a';
+  ctx.fillRect(cx - w / 2, footY - legH - h, w, h);
+  ctx.fillStyle = '#5e4527';
+  ctx.fillRect(cx - w / 2 + 4 * s, footY - legH, 5 * s, legH);
+  ctx.fillRect(cx + w / 2 - 9 * s, footY - legH, 5 * s, legH);
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.fillRect(cx - w / 2, footY - legH - h, w, 2 * s);
+}
+
+function drawPoster(cx, topY, w, h, title) {
+  ctx.fillStyle = '#efe8d4';
+  ctx.strokeStyle = '#8a7250';
+  ctx.lineWidth = 2;
+  rr(cx - w / 2, topY, w, h, 3); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#e0703f';
+  ctx.beginPath(); ctx.arc(cx, topY + h * 0.34, w * 0.22, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#4d7a58';
+  ctx.beginPath();
+  ctx.moveTo(cx - w * 0.42, topY + h * 0.62);
+  ctx.lineTo(cx, topY + h * 0.24);
+  ctx.lineTo(cx + w * 0.42, topY + h * 0.62);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#5a4530';
+  ctx.font = `700 ${Math.round(h * 0.15)}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.fillText(title || '温泉卓球場', cx, topY + h * 0.86);
+}
+
+/* 壁際にいる背景の人物（順番待ち／牛乳を飲む人）。台に重なった部分は後で台が上書きする */
+function drawGuest(cx, footY, scaleBase, opts) {
+  const s = scaleBase * Math.min(PW / 400, 1.25);
+  const bw = 40, bh = 56;
+  ctx.save();
+  ctx.translate(cx, footY);
+  ctx.scale(s, s);
+
+  // 体（浴衣）
+  ctx.beginPath();
+  ctx.moveTo(-bw * 0.4, 0);
+  ctx.quadraticCurveTo(-bw * 0.5, -bh * 0.55, -bw * 0.3, -bh);
+  ctx.lineTo(bw * 0.3, -bh);
+  ctx.quadraticCurveTo(bw * 0.5, -bh * 0.55, bw * 0.4, 0);
+  ctx.closePath();
+  ctx.fillStyle = opts.robe;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+  ctx.lineWidth = 1; ctx.stroke();
+  // 帯
+  ctx.fillStyle = opts.sash;
+  ctx.fillRect(-bw * 0.42, -bh * 0.44, bw * 0.84, 8);
+  // 頭・髪
+  ctx.fillStyle = '#f0c398';
+  ctx.beginPath(); ctx.arc(0, -bh - 13, 12, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#3b3028';
+  ctx.beginPath();
+  ctx.arc(0, -bh - 16, 12, Math.PI * 1.1, Math.PI * 1.9);
+  ctx.quadraticCurveTo(10, -bh - 22, 0, -bh - 25);
+  ctx.closePath(); ctx.fill();
+
+  if (opts.pose === 'wait') {
+    // 腕組み：両腕を体の前でまとめる
+    ctx.fillStyle = opts.robe;
+    ctx.beginPath();
+    ctx.ellipse(0, -bh * 0.52, bw * 0.34, 9, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = 1; ctx.stroke();
+    // 点目（軽く目を閉じて待っている雰囲気）
+    ctx.strokeStyle = '#3b3028'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(-6, -bh - 13); ctx.lineTo(-2, -bh - 13); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(2, -bh - 13); ctx.lineTo(6, -bh - 13); ctx.stroke();
+  } else if (opts.pose === 'milk') {
+    // 左手は腰に
+    ctx.fillStyle = opts.robe;
+    ctx.beginPath();
+    ctx.moveTo(-bw * 0.38, -bh * 0.58);
+    ctx.quadraticCurveTo(-bw * 0.62, -bh * 0.42, -bw * 0.34, -bh * 0.22);
+    ctx.quadraticCurveTo(-bw * 0.30, -bh * 0.42, -bw * 0.38, -bh * 0.58);
+    ctx.closePath(); ctx.fill();
+    // 右腕を曲げて瓶を口元へ
+    ctx.fillStyle = '#f0c398';
+    ctx.save();
+    ctx.translate(bw * 0.30, -bh * 0.62);
+    ctx.rotate(-1.05);
+    ctx.fillRect(-3.5, 0, 7, 28);
+    ctx.restore();
+    ctx.fillStyle = '#e9c47a';
+    ctx.fillRect(bw * 0.24, -bh - 8, 8, 18);
+    ctx.fillStyle = '#a97c2e';
+    ctx.fillRect(bw * 0.25, -bh - 12, 6, 5);
+    // 点目（うまそうに飲んでいる）
+    ctx.strokeStyle = '#3b3028'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(-4, -bh - 13, 1.4, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  // 足もと（スリッパ）
+  ctx.fillStyle = '#8a8a86';
+  ctx.beginPath(); ctx.ellipse(-9, 5, 9, 4.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(9, 5, 9, 4.5, 0, 0, Math.PI * 2); ctx.fill();
+
+  ctx.restore();
+}
+
 /* ---------- 卓球台 ---------- */
 function drawTable() {
   const top = courtRow(0), bot = courtRow(1);
   // 台の脚
   ctx.fillStyle = '#3a4d42';
-  const legW = W * 0.02;
-  ctx.fillRect(bot.x + bot.w * 0.12, bot.y, legW, H * 0.10);
-  ctx.fillRect(bot.x + bot.w * 0.86, bot.y, legW, H * 0.10);
+  const legW = PW * 0.02;
+  ctx.fillRect(bot.x + bot.w * 0.12, bot.y, legW, H * 0.05);
+  ctx.fillRect(bot.x + bot.w * 0.86, bot.y, legW, H * 0.05);
   // 台の側面（厚み）
   ctx.fillStyle = '#174f36';
   ctx.beginPath();
@@ -598,7 +987,7 @@ function drawTable() {
   ctx.lineTo(bot.x + bot.w, bot.y); ctx.lineTo(bot.x, bot.y);
   ctx.closePath(); ctx.stroke();
   ctx.lineWidth = 1.2;
-  ctx.beginPath(); ctx.moveTo(W / 2, top.y); ctx.lineTo(W / 2, bot.y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px(0.5), top.y); ctx.lineTo(px(0.5), bot.y); ctx.stroke();
   // ネット
   const mid = courtRow(0.5);
   const netH = H * 0.030;
@@ -620,9 +1009,16 @@ function drawTable() {
 function drawFigure(nx, u, side, swing) {
   const p = courtPos(nx, clamp(u, 0, 1));
   const near = side === 'player';
-  const s = p.scale * (near ? 1.15 : 1.08) * Math.min(W / 400, 1.25);
+  const s = p.scale * (near ? 1.15 : 1.08) * Math.min(PW / 400, 1.25);
   const baseY = p.y + (near ? H * 0.085 : H * 0.010);
 
+  ctx.save();
+  if (!near) {
+    // 相手は台の奥に立っているので、裾が台の天板より下にはみ出さないよう隠す
+    ctx.beginPath();
+    ctx.rect(0, 0, W, H * COURT.topY);
+    ctx.clip();
+  }
   ctx.save();
   ctx.translate(p.x, baseY);
   ctx.scale(s, s);
@@ -773,6 +1169,18 @@ function drawFigure(nx, u, side, swing) {
   }
 
   ctx.restore();
+  ctx.restore();
+}
+function drawServeBall() {
+  const p = courtPos(G.pX, 1);
+  const r = 6.5;
+  const by = p.y - H * 0.06 + Math.sin(G.time * 3) * 2;
+  ctx.fillStyle = '#f7f5ee';
+  ctx.beginPath(); ctx.arc(p.x, by, r, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(140,140,120,0.5)';
+  ctx.lineWidth = 0.8; ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.beginPath(); ctx.arc(p.x - r * 0.3, by - r * 0.35, r * 0.3, 0, Math.PI * 2); ctx.fill();
 }
 
 /* ---------- ボール ---------- */
@@ -839,8 +1247,19 @@ function drawSteam() {
 function drawHud() {
   const y = H * 0.045;
   // スコア板（木札風）
-  hudPlate(W * 0.09, y, 'あなた', G.scoreP, '#2c3e66');
-  hudPlate(W * 0.91, y, 'あいて', G.scoreC, '#96413a');
+  hudPlate(px(0.09), y, 'あなた', G.scoreP, '#2c3e66');
+  hudPlate(px(0.91), y, 'あいて', G.scoreC, '#96413a');
+
+  // サーブ待ちの案内
+  if (phase === 'serveWait') {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(50, 38, 22, 0.88)';
+    ctx.font = `700 ${Math.round(H * 0.024)}px sans-serif`;
+    const pulse = 0.85 + Math.sin(G.time * 4) * 0.15;
+    ctx.globalAlpha = pulse;
+    ctx.fillText('右をタップしてサーブ', px(0.5), H * 0.30);
+    ctx.globalAlpha = 1;
+  }
 
   // フロートメッセージ
   if (G.msg) {
@@ -849,7 +1268,7 @@ function drawHud() {
     ctx.textAlign = 'center';
     ctx.fillStyle = `rgba(50, 38, 22, ${alpha * 0.9})`;
     ctx.font = `700 ${Math.round(H * 0.026)}px sans-serif`;
-    ctx.fillText(G.msg, W / 2, H * 0.30 - t * 12);
+    ctx.fillText(G.msg, px(0.5), H * 0.30 - t * 12);
   }
 
   // 操作ガイド（開始直後だけ薄く）
@@ -858,12 +1277,12 @@ function drawHud() {
     ctx.font = `${Math.round(H * 0.015)}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.fillStyle = `rgba(50, 38, 22, ${a})`;
-    ctx.fillText('← ドラッグでうごく', W * 0.27, H * 0.90);
-    ctx.fillText('タップで打つ →', W * 0.73, H * 0.90);
+    ctx.fillText('← ドラッグでうごく', px(0.27), H * 0.955);
+    ctx.fillText('タップで打つ →', px(0.73), H * 0.955);
   }
 }
 function hudPlate(cx, cy, label, score, color) {
-  const w = W * 0.155, h = H * 0.062;
+  const w = PW * 0.155, h = H * 0.062;
   ctx.fillStyle = '#f3ecd8';
   ctx.strokeStyle = '#8a6f4d';
   ctx.lineWidth = 2;
@@ -894,23 +1313,31 @@ function rr(x, y, w, h, r) {
 let movePointerId = null;
 let moveOffsetX = 0;   // 指位置とパドルのズレを保持（吸い付き防止）
 
+/* 画面上のX → プレイ領域内の正規化X（左右のガター分を差し引く） */
+function playNxFromEvent(e) {
+  const rect = canvas.getBoundingClientRect();
+  const sx = (e.clientX - rect.left) * (W / rect.width);
+  return (sx - PX) / PW;
+}
+/* 左右どちらのタッチかは画面全体の半分で判定する（ガター部分を触っても効くように） */
+function screenNxFromEvent(e) {
+  const rect = canvas.getBoundingClientRect();
+  return (e.clientX - rect.left) / rect.width;
+}
+
 canvas.addEventListener('pointerdown', (e) => {
   if (!G.running) return;
   canvas.setPointerCapture(e.pointerId);
-  const rect = canvas.getBoundingClientRect();
-  const nx = (e.clientX - rect.left) / rect.width;
-  if (nx < 0.55 && movePointerId === null) {
+  if (screenNxFromEvent(e) < 0.5 && movePointerId === null) {
     movePointerId = e.pointerId;
-    moveOffsetX = G.pX - nx;
+    moveOffsetX = G.pX - playNxFromEvent(e);
   } else {
     tryPlayerHit();
   }
 });
 canvas.addEventListener('pointermove', (e) => {
   if (e.pointerId !== movePointerId || !G.running) return;
-  const rect = canvas.getBoundingClientRect();
-  const nx = (e.clientX - rect.left) / rect.width;
-  G.pX = clamp(nx + moveOffsetX, 0.08, 0.92);
+  G.pX = clamp(playNxFromEvent(e) + moveOffsetX, -0.15, 0.92);
 });
 function releasePointer(e) {
   if (e.pointerId === movePointerId) movePointerId = null;
