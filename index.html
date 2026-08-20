@@ -58,12 +58,89 @@
   .panel button:active { transform: translateY(2px); box-shadow: 0 2px 0 #3c7440; }
   #resultPanel { display: none; }
   .record { font-size: 13px; opacity: 0.85; margin: 0; }
+
+  /* ============================================================
+     見た目だけの操作ガイド（左：移動コントローラー／右：打つボタン）
+     実際の入力判定は canvas 側の pointerdown/move がそのまま担当するため、
+     この2つは pointer-events: none にして完全に見た目専用にする。
+  ============================================================ */
+  #ctrlLayer {
+    position: absolute; inset: 0;
+    pointer-events: none;
+    z-index: 5;
+    opacity: 0;
+    transition: opacity 0.5s ease;
+  }
+  #ctrlLayer.show { opacity: 1; }
+
+  .ctrl-move {
+    position: absolute;
+    left: 4.5%;
+    bottom: 6%;
+    width: min(46vw, 220px);
+    height: 56px;
+    border-radius: 999px;
+    background: linear-gradient(180deg, rgba(243,236,216,0.24), rgba(243,236,216,0.10));
+    border: 1.5px solid rgba(243,236,216,0.55);
+    box-shadow: 0 3px 10px rgba(0,0,0,0.25), inset 0 1px 2px rgba(255,255,255,0.25);
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px;
+    box-sizing: border-box;
+  }
+  .ctrl-move .arrow {
+    width: 0; height: 0;
+    border-top: 8px solid transparent;
+    border-bottom: 8px solid transparent;
+    opacity: 0.85;
+  }
+  .ctrl-move .arrow.l { border-right: 11px solid #f3ecd8; }
+  .ctrl-move .arrow.r { border-left: 11px solid #f3ecd8; }
+  .ctrl-move .knob {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #ffffff, #d8cdaf 70%, #b8a97e);
+    box-shadow: 0 2px 5px rgba(0,0,0,0.35);
+  }
+
+  .ctrl-hit {
+    position: absolute;
+    right: 4.5%;
+    bottom: 6%;
+    width: 74px; height: 74px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #6fc074, #4d9e55 55%, #2f6b38);
+    border: 2px solid rgba(255,255,255,0.6);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.35), inset 0 2px 3px rgba(255,255,255,0.35);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .ctrl-hit span {
+    font-size: 13px; font-weight: 700; color: #fff;
+    letter-spacing: 0.08em;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.35);
+  }
+
+  @media (max-width: 380px) {
+    .ctrl-hit { width: 62px; height: 62px; }
+    .ctrl-move { height: 48px; }
+  }
 </style>
 </head>
 <body>
-<!-- build: 2026-07-23-3 -->
+<!-- build: 2026-08-21-4 -->
 <div id="stage">
   <canvas id="game"></canvas>
+
+  <!-- 見た目専用の操作ガイド。実際の判定は canvas が担当（pointer-events: none） -->
+  <div id="ctrlLayer">
+    <div class="ctrl-move">
+      <div class="arrow l"></div>
+      <div class="knob"></div>
+      <div class="arrow r"></div>
+    </div>
+    <div class="ctrl-hit">
+      <span>打</span>
+    </div>
+  </div>
 
   <div class="panel" id="startPanel">
     <h1>温泉卓球</h1>
@@ -1257,7 +1334,7 @@ function drawHud() {
     ctx.font = `700 ${Math.round(H * 0.024)}px sans-serif`;
     const pulse = 0.85 + Math.sin(G.time * 4) * 0.15;
     ctx.globalAlpha = pulse;
-    ctx.fillText('右をタップしてサーブ', px(0.5), H * 0.30);
+    ctx.fillText('右側をタップしてサーブ', px(0.5), H * 0.30);
     ctx.globalAlpha = 1;
   }
 
@@ -1269,16 +1346,6 @@ function drawHud() {
     ctx.fillStyle = `rgba(50, 38, 22, ${alpha * 0.9})`;
     ctx.font = `700 ${Math.round(H * 0.026)}px sans-serif`;
     ctx.fillText(G.msg, px(0.5), H * 0.30 - t * 12);
-  }
-
-  // 操作ガイド（開始直後だけ薄く）
-  if (G.running && G.time < 6) {
-    const a = clamp(6 - G.time, 0, 1) * 0.5;
-    ctx.font = `${Math.round(H * 0.015)}px sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.fillStyle = `rgba(50, 38, 22, ${a})`;
-    ctx.fillText('← ドラッグでうごく', px(0.27), H * 0.955);
-    ctx.fillText('タップで打つ →', px(0.73), H * 0.955);
   }
 }
 function hudPlate(cx, cy, label, score, color) {
@@ -1309,6 +1376,9 @@ function rr(x, y, w, h, r) {
 
 /* ============================================================
    入力（マルチタッチ：左指=移動、右指=タップ を同時に成立させる）
+   ※ 画面下の見た目コントローラー（#ctrlLayer）は pointer-events: none。
+     実際の判定は今まで通り「画面左半分＝ドラッグで移動」
+     「画面右半分＝タップで打つ」のまま canvas がすべて処理する。
 ============================================================ */
 let movePointerId = null;
 let moveOffsetX = 0;   // 指位置とパドルのズレを保持（吸い付き防止）
@@ -1376,14 +1446,17 @@ requestAnimationFrame(loop);
 /* ============================================================
    開始・リトライ
 ============================================================ */
+const ctrlLayer = document.getElementById('ctrlLayer');
 document.getElementById('startBtn').addEventListener('click', () => {
   AudioSys.unlock();
   document.getElementById('startPanel').style.display = 'none';
+  ctrlLayer.classList.add('show');
   G.time = 0;
   startGame();
 });
 document.getElementById('retryBtn').addEventListener('click', () => {
   AudioSys.unlock();
+  ctrlLayer.classList.add('show');
   startGame();
 });
 
